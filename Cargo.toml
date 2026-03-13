@@ -1,0 +1,11 @@
+[package]
+name = "ftp_downloader"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+suppaftp = "6"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+filetime = "0.2"
+crossterm = "0.28"

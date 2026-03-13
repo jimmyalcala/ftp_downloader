@@ -1,0 +1,7 @@
+# Configuración de conexión FTP
+host = "ftpb2.dronena.com"
+port = 21
+username = "x46"
+password = "ftpdnx46"
+remote_directory = "/clientes/Z167/FACTURA"
+local_directory = "./descargas"
