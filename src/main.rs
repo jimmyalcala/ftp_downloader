@@ -35,7 +35,7 @@ fn default_gui() -> bool {
     true
 }
 
-// ─── Output trait: abstrae GUI vs consola ───
+// ─── Output trait: abstracts GUI vs console ───
 
 trait Output {
     fn log(&mut self, text: &str, level: LogLevel);
@@ -53,7 +53,7 @@ enum LogLevel {
     Title,
 }
 
-// ─── Modo consola (sin GUI) ───
+// ─── Console mode (no GUI) ───
 
 struct ConsoleOutput;
 
@@ -66,17 +66,17 @@ impl Output for ConsoleOutput {
     }
 
     fn progress(&mut self, _procesados: u32, _total: u32, _descargados: u32, _omitidos: u32, _errores: u32, _file: &str) {
-        // No mostrar barra en modo consola
+        // No progress bar in console mode
     }
 
     fn wait_exit(&mut self) {
-        // No esperar en modo consola
+        // No wait in console mode
     }
 
     fn cleanup(&mut self) {}
 }
 
-// ─── Modo GUI (Norton Commander) ───
+// ─── GUI mode (Norton Commander) ───
 
 const BG_MAIN: Color = Color::DarkBlue;
 const FG_TITLE: Color = Color::Yellow;
@@ -276,7 +276,7 @@ impl GuiOutput {
 
         let file_display: String = current_file.chars().take(30).collect();
         let status = format!(
-            " {}/{} | Desc:{} Omit:{} Err:{} | {}",
+            " {}/{} | Down:{} Skip:{} Err:{} | {}",
             procesados, total, descargados, omitidos, errores, file_display
         );
         let status_trimmed: String = status.chars().take(inner).collect();
@@ -322,7 +322,7 @@ impl Output for GuiOutput {
 
     fn wait_exit(&mut self) {
         self.log("", LogLevel::Info);
-        self.log(" Presione ENTER para salir...", LogLevel::Info);
+        self.log(" Press ENTER to exit...", LogLevel::Info);
         let mut buf = String::new();
         let _ = io::stdin().read_line(&mut buf);
     }
@@ -357,8 +357,36 @@ fn main() -> ExitCode {
 
     let config_text = match fs::read_to_string(&config_path) {
         Ok(t) => t,
+        Err(_) if !Path::new(&config_path).exists() => {
+            eprintln!("Config file '{config_path}' not found.");
+            eprint!("Would you like to create a sample config file? [Y/n] ");
+            io::stdout().flush().ok();
+            let mut answer = String::new();
+            let _ = io::stdin().read_line(&mut answer);
+            let answer = answer.trim().to_lowercase();
+            if answer.is_empty() || answer == "y" || answer == "yes" {
+                let sample = r#"# FTP Downloader configuration
+host = "ftp.example.com"
+port = 21
+username = "user"
+password = "password"
+remote_directory = "/remote/path"
+local_directory = "./downloads"
+# Timeout in seconds (default 15)
+timeout = 15
+# Show TUI interface (default true)
+gui = true
+"#;
+                if let Err(e) = fs::write(&config_path, sample) {
+                    eprintln!("Could not create {config_path}: {e}");
+                } else {
+                    eprintln!("Created '{config_path}'. Edit it with your FTP details and run again.");
+                }
+            }
+            return ExitCode::FAILURE;
+        }
         Err(e) => {
-            eprintln!("No se pudo leer {config_path}: {e}");
+            eprintln!("Could not read {config_path}: {e}");
             return ExitCode::FAILURE;
         }
     };
@@ -366,7 +394,7 @@ fn main() -> ExitCode {
     let config: Config = match toml::from_str(&config_text) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("Error en configuración: {e}");
+            eprintln!("Configuration error: {e}");
             return ExitCode::FAILURE;
         }
     };
@@ -383,15 +411,15 @@ fn main() -> ExitCode {
     };
 
     if let Err(e) = fs::create_dir_all(&config.local_directory) {
-        out.log(&format!(" Error creando directorio {}: {e}", config.local_directory), LogLevel::Error);
+        out.log(&format!(" Error creating directory {}: {e}", config.local_directory), LogLevel::Error);
         out.cleanup();
         return ExitCode::FAILURE;
     }
 
     let address = format!("{}:{}", config.host, config.port);
-    out.log(&format!(" Conectando a {address}..."), LogLevel::Info);
-    out.log(&format!(" Timeout: {} segundos", config.timeout), LogLevel::Info);
-    out.progress(0, 0, 0, 0, 0, "Conectando...");
+    out.log(&format!(" Connecting to {address}..."), LogLevel::Info);
+    out.log(&format!(" Timeout: {}s", config.timeout), LogLevel::Info);
+    out.progress(0, 0, 0, 0, 0, "Connecting...");
 
     let timeout = Duration::from_secs(config.timeout);
 
@@ -399,14 +427,14 @@ fn main() -> ExitCode {
         Ok(mut addrs) => match addrs.next() {
             Some(a) => a,
             None => {
-                out.log(&format!(" No se encontró dirección para {address}"), LogLevel::Error);
+                out.log(&format!(" Could not find address for {address}"), LogLevel::Error);
                 out.wait_exit();
                 out.cleanup();
                 return ExitCode::FAILURE;
             }
         },
         Err(e) => {
-            out.log(&format!(" No se pudo resolver {address}: {e}"), LogLevel::Error);
+            out.log(&format!(" Could not resolve {address}: {e}"), LogLevel::Error);
             out.wait_exit();
             out.cleanup();
             return ExitCode::FAILURE;
@@ -416,7 +444,7 @@ fn main() -> ExitCode {
     let mut ftp = match FtpStream::connect_timeout(sock_addr, timeout) {
         Ok(f) => f,
         Err(e) => {
-            out.log(&format!(" No se pudo conectar a {address}: {e}"), LogLevel::Error);
+            out.log(&format!(" Could not connect to {address}: {e}"), LogLevel::Error);
             out.wait_exit();
             out.cleanup();
             return ExitCode::FAILURE;
@@ -427,63 +455,63 @@ fn main() -> ExitCode {
     ftp.get_ref().set_write_timeout(Some(timeout)).ok();
 
     if let Err(e) = ftp.login(&config.username, &config.password) {
-        out.log(&format!(" Error de autenticación: {e}"), LogLevel::Error);
+        out.log(&format!(" Authentication error: {e}"), LogLevel::Error);
         out.wait_exit();
         out.cleanup();
         return ExitCode::FAILURE;
     }
 
-    out.log(&format!(" Autenticado como {}", config.username), LogLevel::Ok);
+    out.log(&format!(" Authenticated as {}", config.username), LogLevel::Ok);
 
     if let Err(e) = ftp.cwd(&config.remote_directory) {
-        out.log(&format!(" No se pudo acceder a {}: {e}", config.remote_directory), LogLevel::Error);
+        out.log(&format!(" Could not access {}: {e}", config.remote_directory), LogLevel::Error);
         out.wait_exit();
         out.cleanup();
         return ExitCode::FAILURE;
     }
 
-    out.log(&format!(" Directorio: {}", config.remote_directory), LogLevel::Info);
+    out.log(&format!(" Directory: {}", config.remote_directory), LogLevel::Info);
 
     ftp.transfer_type(suppaftp::types::FileType::Binary).ok();
 
-    out.log(" Listando archivos...", LogLevel::Info);
+    out.log(" Listing files...", LogLevel::Info);
 
     let listing = match ftp.nlst(None) {
         Ok(l) => l,
         Err(e) => {
-            out.log(&format!(" Error al listar archivos: {e}"), LogLevel::Error);
+            out.log(&format!(" Error listing files: {e}"), LogLevel::Error);
             out.wait_exit();
             out.cleanup();
             return ExitCode::FAILURE;
         }
     };
 
-    let archivos: Vec<&str> = listing
+    let files: Vec<&str> = listing
         .iter()
         .map(|s| s.trim())
         .filter(|s| !s.is_empty() && *s != "." && *s != "..")
         .collect();
 
-    let total = archivos.len() as u32;
-    out.log(&format!(" Encontrados {total} archivos."), LogLevel::Title);
-    out.progress(0, total, 0, 0, 0, "Iniciando...");
+    let total = files.len() as u32;
+    out.log(&format!(" Found {total} files."), LogLevel::Title);
+    out.progress(0, total, 0, 0, 0, "Starting...");
 
-    let mut descargados = 0u32;
-    let mut omitidos = 0u32;
-    let mut errores = 0u32;
-    let mut procesados = 0u32;
-    let mut archivos_con_error: Vec<(String, String)> = Vec::new();
+    let mut downloaded = 0u32;
+    let mut skipped = 0u32;
+    let mut errors = 0u32;
+    let mut processed = 0u32;
+    let mut failed_files: Vec<(String, String)> = Vec::new();
 
-    for filename in &archivos {
-        procesados += 1;
+    for filename in &files {
+        processed += 1;
         let local_path = Path::new(&config.local_directory).join(filename);
 
-        out.progress(procesados, total, descargados, omitidos, errores, filename);
+        out.progress(processed, total, downloaded, skipped, errors, filename);
 
         if local_path.exists() {
             out.log(&format!(" SKIP  {filename}"), LogLevel::Skip);
-            omitidos += 1;
-            out.progress(procesados, total, descargados, omitidos, errores, filename);
+            skipped += 1;
+            out.progress(processed, total, downloaded, skipped, errors, filename);
             continue;
         }
 
@@ -497,16 +525,16 @@ fn main() -> ExitCode {
                     Err(e) => {
                         let msg = format!("{e}");
                         out.log(&format!(" ERR   {filename}: {msg}"), LogLevel::Error);
-                        archivos_con_error.push((filename.to_string(), msg));
-                        errores += 1;
+                        failed_files.push((filename.to_string(), msg));
+                        errors += 1;
                         continue;
                     }
                 };
                 if let Err(e) = file.write_all(&data) {
                     let msg = format!("{e}");
                     out.log(&format!(" ERR   {filename}: {msg}"), LogLevel::Error);
-                    archivos_con_error.push((filename.to_string(), msg));
-                    errores += 1;
+                    failed_files.push((filename.to_string(), msg));
+                    errors += 1;
                     continue;
                 }
                 if let Ok(remote_time) = ftp.mdtm(filename) {
@@ -515,40 +543,40 @@ fn main() -> ExitCode {
                     filetime::set_file_mtime(&local_path, ft).ok();
                 }
                 out.log(&format!(" OK    {filename} ({size} bytes)"), LogLevel::Ok);
-                descargados += 1;
+                downloaded += 1;
             }
             Err(e) => {
                 let msg = format!("{e}");
                 out.log(&format!(" ERR   {filename}: {msg}"), LogLevel::Error);
-                archivos_con_error.push((filename.to_string(), msg));
-                errores += 1;
+                failed_files.push((filename.to_string(), msg));
+                errors += 1;
             }
         }
 
-        out.progress(procesados, total, descargados, omitidos, errores, filename);
+        out.progress(processed, total, downloaded, skipped, errors, filename);
     }
 
     let _ = ftp.quit();
 
-    out.progress(total, total, descargados, omitidos, errores, "Completado!");
+    out.progress(total, total, downloaded, skipped, errors, "Done!");
     out.log("", LogLevel::Info);
     out.log(
-        &format!(" Resumen: {descargados} descargados, {omitidos} omitidos, {errores} errores."),
+        &format!(" Summary: {downloaded} downloaded, {skipped} skipped, {errors} errors."),
         LogLevel::Title,
     );
 
-    if !archivos_con_error.is_empty() {
+    if !failed_files.is_empty() {
         out.log("", LogLevel::Info);
-        out.log(" Archivos con error:", LogLevel::Error);
-        for (archivo, motivo) in &archivos_con_error {
-            out.log(&format!("  - {archivo}: {motivo}"), LogLevel::Error);
+        out.log(" Failed files:", LogLevel::Error);
+        for (file, reason) in &failed_files {
+            out.log(&format!("  - {file}: {reason}"), LogLevel::Error);
         }
     }
 
     out.wait_exit();
     out.cleanup();
 
-    if errores > 0 {
+    if errors > 0 {
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
