@@ -343,8 +343,59 @@ impl Output for GuiOutput {
 
 // ─── Main ───
 
+fn print_help() {
+    let version = env!("CARGO_PKG_VERSION");
+    println!("ftp_downloader v{version}");
+    println!();
+    println!("Download all files from a remote FTP directory.");
+    println!();
+    println!("USAGE:");
+    println!("  ftp_downloader [OPTIONS] [CONFIG_FILE]");
+    println!();
+    println!("ARGUMENTS:");
+    println!("  [CONFIG_FILE]    Path to config file (default: config.toml)");
+    println!();
+    println!("OPTIONS:");
+    println!("  -h, --help       Show this help message and exit");
+    println!("  -v, --version    Show version and exit");
+    println!("  -q, --nogui      Run in console mode without TUI");
+    println!();
+    println!("CONFIG FILE:");
+    println!("  If no config file is found, you will be prompted to create one.");
+    println!("  The config file uses TOML format with the following fields:");
+    println!();
+    println!("    host              FTP server address");
+    println!("    port              Connection port (usually 21)");
+    println!("    username          FTP username");
+    println!("    password          FTP password");
+    println!("    remote_directory  Remote directory to download from");
+    println!("    local_directory   Local directory to save files");
+    println!("    timeout           Connection timeout in seconds (default: 15)");
+    println!("    gui               Show TUI interface (default: true)");
+    println!();
+    println!("EXAMPLES:");
+    println!("  ftp_downloader                    Use config.toml in current directory");
+    println!("  ftp_downloader server.toml        Use a custom config file");
+    println!("  ftp_downloader -q                 Run without TUI");
+    println!("  ftp_downloader -q server.toml     Combine options");
+}
+
+fn print_version() {
+    println!("ftp_downloader v{}", env!("CARGO_PKG_VERSION"));
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
+
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        print_help();
+        return ExitCode::SUCCESS;
+    }
+
+    if args.iter().any(|a| a == "--version" || a == "-v") {
+        print_version();
+        return ExitCode::SUCCESS;
+    }
 
     let nogui_flag = args.iter().any(|a| a == "--nogui" || a == "-q");
 
