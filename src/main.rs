@@ -7,7 +7,10 @@ use filetime::FileTime;
 use serde::Deserialize;
 use std::fs;
 use std::io::{self, Seek, Write};
+use std::net::ToSocketAddrs;
 use std::path::Path;
+use std::process::ExitCode;
+use std::time::Duration;
 use suppaftp::FtpStream;
 
 #[derive(Deserialize)]
@@ -18,7 +21,62 @@ struct Config {
     password: String,
     remote_directory: String,
     local_directory: String,
+    #[serde(default = "default_timeout")]
+    timeout: u64,
+    #[serde(default = "default_gui")]
+    gui: bool,
 }
+
+fn default_timeout() -> u64 {
+    15
+}
+
+fn default_gui() -> bool {
+    true
+}
+
+// ─── Output trait: abstrae GUI vs consola ───
+
+trait Output {
+    fn log(&mut self, text: &str, level: LogLevel);
+    fn progress(&mut self, procesados: u32, total: u32, descargados: u32, omitidos: u32, errores: u32, file: &str);
+    fn wait_exit(&mut self);
+    fn cleanup(&mut self);
+}
+
+#[derive(Clone, Copy)]
+enum LogLevel {
+    Info,
+    Ok,
+    Skip,
+    Error,
+    Title,
+}
+
+// ─── Modo consola (sin GUI) ───
+
+struct ConsoleOutput;
+
+impl Output for ConsoleOutput {
+    fn log(&mut self, text: &str, level: LogLevel) {
+        match level {
+            LogLevel::Error => eprintln!("{text}"),
+            _ => println!("{text}"),
+        }
+    }
+
+    fn progress(&mut self, _procesados: u32, _total: u32, _descargados: u32, _omitidos: u32, _errores: u32, _file: &str) {
+        // No mostrar barra en modo consola
+    }
+
+    fn wait_exit(&mut self) {
+        // No esperar en modo consola
+    }
+
+    fn cleanup(&mut self) {}
+}
+
+// ─── Modo GUI (Norton Commander) ───
 
 const BG_MAIN: Color = Color::DarkBlue;
 const FG_TITLE: Color = Color::Yellow;
@@ -35,13 +93,13 @@ struct LogLine {
     color: Color,
 }
 
-struct Ui {
+struct GuiOutput {
     width: u16,
     height: u16,
     lines: Vec<LogLine>,
 }
 
-impl Ui {
+impl GuiOutput {
     fn init() -> io::Result<Self> {
         let (width, height) = terminal::size()?;
         let mut stdout = io::stdout();
@@ -54,10 +112,10 @@ impl Ui {
             lines: Vec::new(),
         };
         ui.redraw_full()?;
+        ui.draw_header(" FTP Downloader ")?;
         Ok(ui)
     }
 
-    /// Cuántas líneas de log caben entre el header (3 filas) y la barra (3 filas)
     fn log_capacity(&self) -> usize {
         if self.height > 6 {
             (self.height - 6) as usize
@@ -69,8 +127,6 @@ impl Ui {
     fn redraw_full(&self) -> io::Result<()> {
         let mut stdout = io::stdout();
         let w = self.width as usize;
-
-        // Fondo azul completo
         for row in 0..self.height {
             queue!(
                 stdout,
@@ -80,16 +136,15 @@ impl Ui {
                 style::Print(" ".repeat(w)),
             )?;
         }
-
         stdout.flush()
     }
 
     fn draw_header(&self, title: &str) -> io::Result<()> {
         let mut stdout = io::stdout();
         let w = self.width as usize;
+        let inner = w.saturating_sub(2);
 
-        // Borde superior
-        let top = format!("╔{}╗", "═".repeat(w.saturating_sub(2)));
+        let top = format!("╔{}╗", "═".repeat(inner));
         queue!(
             stdout,
             cursor::MoveTo(0, 0),
@@ -99,19 +154,17 @@ impl Ui {
             style::Print(&top),
         )?;
 
-        // Título centrado
-        let inner = w.saturating_sub(2);
         let tlen = title.chars().count().min(inner);
         let pad_l = (inner - tlen) / 2;
         let pad_r = inner - tlen - pad_l;
-        let mid = format!("║{}{}{}║", " ".repeat(pad_l), &title[..title.len().min(inner)], " ".repeat(pad_r));
-        queue!(
-            stdout,
-            cursor::MoveTo(0, 1),
-            style::Print(&mid),
-        )?;
+        let mid = format!(
+            "║{}{}{}║",
+            " ".repeat(pad_l),
+            &title[..title.len().min(inner)],
+            " ".repeat(pad_r)
+        );
+        queue!(stdout, cursor::MoveTo(0, 1), style::Print(&mid))?;
 
-        // Separador
         let sep = format!("╠{}╣", "═".repeat(inner));
         queue!(
             stdout,
@@ -123,27 +176,13 @@ impl Ui {
         stdout.flush()
     }
 
-    fn log(&mut self, text: &str, color: Color) -> io::Result<()> {
-        self.lines.push(LogLine {
-            text: text.to_string(),
-            color,
-        });
-        self.redraw_log()
-    }
-
     fn redraw_log(&self) -> io::Result<()> {
         let mut stdout = io::stdout();
         let cap = self.log_capacity();
         let w = self.width as usize;
         let inner = w.saturating_sub(2);
 
-        // Determinar qué líneas mostrar (las últimas que caben)
-        let start = if self.lines.len() > cap {
-            self.lines.len() - cap
-        } else {
-            0
-        };
-
+        let start = self.lines.len().saturating_sub(cap);
         let visible = &self.lines[start..];
 
         for (i, line) in (0..cap).zip(visible.iter()) {
@@ -164,7 +203,6 @@ impl Ui {
             )?;
         }
 
-        // Limpiar filas vacías restantes
         for i in visible.len()..cap {
             let row = 3 + i as u16;
             queue!(
@@ -181,7 +219,7 @@ impl Ui {
         stdout.flush()
     }
 
-    fn draw_progress(
+    fn draw_progress_bar(
         &self,
         procesados: u32,
         total: u32,
@@ -201,7 +239,6 @@ impl Ui {
             0
         };
 
-        // ── Separador ──
         let sep = format!("╠{}╣", "═".repeat(inner));
         queue!(
             stdout,
@@ -212,8 +249,6 @@ impl Ui {
             style::Print(&sep),
         )?;
 
-        // ── Barra de progreso ──
-        // Formato: "║ 100% [████████░░░░] ║"
         let prefix = format!(" {:>3}% [", pct);
         let suffix = "] ";
         let bar_width = inner.saturating_sub(prefix.len() + suffix.len());
@@ -239,7 +274,6 @@ impl Ui {
             SetAttribute(Attribute::Reset),
         )?;
 
-        // ── Línea de estado ──
         let file_display: String = current_file.chars().take(30).collect();
         let status = format!(
             " {}/{} | Desc:{} Omit:{} Err:{} | {}",
@@ -264,8 +298,36 @@ impl Ui {
 
         stdout.flush()
     }
+}
 
-    fn cleanup(&self) -> io::Result<()> {
+impl Output for GuiOutput {
+    fn log(&mut self, text: &str, level: LogLevel) {
+        let color = match level {
+            LogLevel::Info => FG_TEXT,
+            LogLevel::Ok => FG_OK,
+            LogLevel::Skip => FG_SKIP,
+            LogLevel::Error => FG_ERR,
+            LogLevel::Title => FG_TITLE,
+        };
+        self.lines.push(LogLine {
+            text: text.to_string(),
+            color,
+        });
+        self.redraw_log().ok();
+    }
+
+    fn progress(&mut self, procesados: u32, total: u32, descargados: u32, omitidos: u32, errores: u32, file: &str) {
+        self.draw_progress_bar(procesados, total, descargados, omitidos, errores, file).ok();
+    }
+
+    fn wait_exit(&mut self) {
+        self.log("", LogLevel::Info);
+        self.log(" Presione ENTER para salir...", LogLevel::Info);
+        let mut buf = String::new();
+        let _ = io::stdin().read_line(&mut buf);
+    }
+
+    fn cleanup(&mut self) {
         let mut stdout = io::stdout();
         execute!(
             stdout,
@@ -275,52 +337,126 @@ impl Ui {
             cursor::Show,
             cursor::MoveTo(0, self.height),
         )
+        .ok();
     }
 }
 
-fn main() {
-    let config_path = std::env::args()
-        .nth(1)
+// ─── Main ───
+
+fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().collect();
+
+    let nogui_flag = args.iter().any(|a| a == "--nogui" || a == "-q");
+
+    let config_path = args
+        .iter()
+        .skip(1)
+        .find(|a| !a.starts_with('-'))
+        .cloned()
         .unwrap_or_else(|| "config.toml".to_string());
 
-    let config_text = fs::read_to_string(&config_path)
-        .unwrap_or_else(|e| panic!("No se pudo leer {config_path}: {e}"));
+    let config_text = match fs::read_to_string(&config_path) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("No se pudo leer {config_path}: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
 
-    let config: Config =
-        toml::from_str(&config_text).unwrap_or_else(|e| panic!("Error en configuración: {e}"));
+    let config: Config = match toml::from_str(&config_text) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Error en configuración: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
 
-    fs::create_dir_all(&config.local_directory).unwrap_or_else(|e| {
-        panic!("No se pudo crear directorio {}: {e}", config.local_directory)
-    });
+    let use_gui = config.gui && !nogui_flag;
 
-    let mut ui = Ui::init().expect("Error inicializando terminal");
-    ui.draw_header(" FTP Downloader ").ok();
+    let mut out: Box<dyn Output> = if use_gui {
+        match GuiOutput::init() {
+            Ok(g) => Box::new(g),
+            Err(_) => Box::new(ConsoleOutput),
+        }
+    } else {
+        Box::new(ConsoleOutput)
+    };
+
+    if let Err(e) = fs::create_dir_all(&config.local_directory) {
+        out.log(&format!(" Error creando directorio {}: {e}", config.local_directory), LogLevel::Error);
+        out.cleanup();
+        return ExitCode::FAILURE;
+    }
 
     let address = format!("{}:{}", config.host, config.port);
-    ui.log(&format!(" Conectando a {address}..."), FG_TEXT).ok();
-    ui.draw_progress(0, 0, 0, 0, 0, "Conectando...").ok();
+    out.log(&format!(" Conectando a {address}..."), LogLevel::Info);
+    out.log(&format!(" Timeout: {} segundos", config.timeout), LogLevel::Info);
+    out.progress(0, 0, 0, 0, 0, "Conectando...");
 
-    let mut ftp = FtpStream::connect(&address)
-        .unwrap_or_else(|e| panic!("No se pudo conectar a {address}: {e}"));
+    let timeout = Duration::from_secs(config.timeout);
 
-    ftp.login(&config.username, &config.password)
-        .unwrap_or_else(|e| panic!("Error de autenticación: {e}"));
+    let sock_addr = match address.to_socket_addrs() {
+        Ok(mut addrs) => match addrs.next() {
+            Some(a) => a,
+            None => {
+                out.log(&format!(" No se encontró dirección para {address}"), LogLevel::Error);
+                out.wait_exit();
+                out.cleanup();
+                return ExitCode::FAILURE;
+            }
+        },
+        Err(e) => {
+            out.log(&format!(" No se pudo resolver {address}: {e}"), LogLevel::Error);
+            out.wait_exit();
+            out.cleanup();
+            return ExitCode::FAILURE;
+        }
+    };
 
-    ui.log(&format!(" Autenticado como {}", config.username), FG_OK).ok();
+    let mut ftp = match FtpStream::connect_timeout(sock_addr, timeout) {
+        Ok(f) => f,
+        Err(e) => {
+            out.log(&format!(" No se pudo conectar a {address}: {e}"), LogLevel::Error);
+            out.wait_exit();
+            out.cleanup();
+            return ExitCode::FAILURE;
+        }
+    };
 
-    ftp.cwd(&config.remote_directory)
-        .unwrap_or_else(|e| panic!("No se pudo acceder a {}: {e}", config.remote_directory));
+    ftp.get_ref().set_read_timeout(Some(timeout)).ok();
+    ftp.get_ref().set_write_timeout(Some(timeout)).ok();
 
-    ui.log(&format!(" Directorio: {}", config.remote_directory), FG_TEXT).ok();
+    if let Err(e) = ftp.login(&config.username, &config.password) {
+        out.log(&format!(" Error de autenticación: {e}"), LogLevel::Error);
+        out.wait_exit();
+        out.cleanup();
+        return ExitCode::FAILURE;
+    }
 
-    ftp.transfer_type(suppaftp::types::FileType::Binary)
-        .unwrap_or_else(|e| panic!("Error modo binario: {e}"));
+    out.log(&format!(" Autenticado como {}", config.username), LogLevel::Ok);
 
-    ui.log(" Listando archivos...", FG_TEXT).ok();
+    if let Err(e) = ftp.cwd(&config.remote_directory) {
+        out.log(&format!(" No se pudo acceder a {}: {e}", config.remote_directory), LogLevel::Error);
+        out.wait_exit();
+        out.cleanup();
+        return ExitCode::FAILURE;
+    }
 
-    let listing = ftp
-        .nlst(None)
-        .unwrap_or_else(|e| panic!("Error al listar archivos: {e}"));
+    out.log(&format!(" Directorio: {}", config.remote_directory), LogLevel::Info);
+
+    ftp.transfer_type(suppaftp::types::FileType::Binary).ok();
+
+    out.log(" Listando archivos...", LogLevel::Info);
+
+    let listing = match ftp.nlst(None) {
+        Ok(l) => l,
+        Err(e) => {
+            out.log(&format!(" Error al listar archivos: {e}"), LogLevel::Error);
+            out.wait_exit();
+            out.cleanup();
+            return ExitCode::FAILURE;
+        }
+    };
 
     let archivos: Vec<&str> = listing
         .iter()
@@ -329,24 +465,25 @@ fn main() {
         .collect();
 
     let total = archivos.len() as u32;
-    ui.log(&format!(" Encontrados {total} archivos."), FG_TITLE).ok();
-    ui.draw_progress(0, total, 0, 0, 0, "Iniciando...").ok();
+    out.log(&format!(" Encontrados {total} archivos."), LogLevel::Title);
+    out.progress(0, total, 0, 0, 0, "Iniciando...");
 
     let mut descargados = 0u32;
     let mut omitidos = 0u32;
     let mut errores = 0u32;
     let mut procesados = 0u32;
+    let mut archivos_con_error: Vec<(String, String)> = Vec::new();
 
     for filename in &archivos {
         procesados += 1;
         let local_path = Path::new(&config.local_directory).join(filename);
 
-        ui.draw_progress(procesados, total, descargados, omitidos, errores, filename).ok();
+        out.progress(procesados, total, descargados, omitidos, errores, filename);
 
         if local_path.exists() {
-            ui.log(&format!(" SKIP  {filename}"), FG_SKIP).ok();
+            out.log(&format!(" SKIP  {filename}"), LogLevel::Skip);
             omitidos += 1;
-            ui.draw_progress(procesados, total, descargados, omitidos, errores, filename).ok();
+            out.progress(procesados, total, descargados, omitidos, errores, filename);
             continue;
         }
 
@@ -355,45 +492,65 @@ fn main() {
                 let size = cursor.seek(io::SeekFrom::End(0)).unwrap() as usize;
                 cursor.seek(io::SeekFrom::Start(0)).unwrap();
                 let data = cursor.into_inner();
-                let mut file = fs::File::create(&local_path).unwrap_or_else(|e| {
-                    panic!("No se pudo crear archivo {}: {e}", local_path.display())
-                });
-                file.write_all(&data).unwrap_or_else(|e| {
-                    panic!("Error al escribir {}: {e}", local_path.display())
-                });
+                let mut file = match fs::File::create(&local_path) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        let msg = format!("{e}");
+                        out.log(&format!(" ERR   {filename}: {msg}"), LogLevel::Error);
+                        archivos_con_error.push((filename.to_string(), msg));
+                        errores += 1;
+                        continue;
+                    }
+                };
+                if let Err(e) = file.write_all(&data) {
+                    let msg = format!("{e}");
+                    out.log(&format!(" ERR   {filename}: {msg}"), LogLevel::Error);
+                    archivos_con_error.push((filename.to_string(), msg));
+                    errores += 1;
+                    continue;
+                }
                 if let Ok(remote_time) = ftp.mdtm(filename) {
                     let timestamp = remote_time.and_utc().timestamp();
                     let ft = FileTime::from_unix_time(timestamp, 0);
                     filetime::set_file_mtime(&local_path, ft).ok();
                 }
-                ui.log(&format!(" OK    {filename} ({size} bytes)"), FG_OK).ok();
+                out.log(&format!(" OK    {filename} ({size} bytes)"), LogLevel::Ok);
                 descargados += 1;
             }
             Err(e) => {
-                ui.log(&format!(" ERR   {filename}: {e}"), FG_ERR).ok();
+                let msg = format!("{e}");
+                out.log(&format!(" ERR   {filename}: {msg}"), LogLevel::Error);
+                archivos_con_error.push((filename.to_string(), msg));
                 errores += 1;
             }
         }
 
-        ui.draw_progress(procesados, total, descargados, omitidos, errores, filename).ok();
+        out.progress(procesados, total, descargados, omitidos, errores, filename);
     }
 
     let _ = ftp.quit();
 
-    ui.draw_progress(total, total, descargados, omitidos, errores, "Completado!").ok();
-    ui.log("", FG_TEXT).ok();
-    ui.log(
+    out.progress(total, total, descargados, omitidos, errores, "Completado!");
+    out.log("", LogLevel::Info);
+    out.log(
         &format!(" Resumen: {descargados} descargados, {omitidos} omitidos, {errores} errores."),
-        FG_TITLE,
-    ).ok();
+        LogLevel::Title,
+    );
 
-    // Esperar Enter para salir
-    ui.log("", FG_TEXT).ok();
-    ui.log(" Presione ENTER para salir...", FG_BAR).ok();
-    ui.draw_progress(total, total, descargados, omitidos, errores, "Completado!").ok();
+    if !archivos_con_error.is_empty() {
+        out.log("", LogLevel::Info);
+        out.log(" Archivos con error:", LogLevel::Error);
+        for (archivo, motivo) in &archivos_con_error {
+            out.log(&format!("  - {archivo}: {motivo}"), LogLevel::Error);
+        }
+    }
 
-    let mut buf = String::new();
-    let _ = io::stdin().read_line(&mut buf);
+    out.wait_exit();
+    out.cleanup();
 
-    ui.cleanup().ok();
+    if errores > 0 {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
 }
