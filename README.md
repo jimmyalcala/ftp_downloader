@@ -18,15 +18,37 @@ A Rust program that downloads all files from a remote FTP directory, featuring a
 - Exit code: `0` on success, `1` if any errors occurred
 - Configuration via TOML file
 
-## Requirements
+## Quick Install
+
+### Linux / macOS
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jimmyalcala/ftp_downloader/master/install.sh | bash
+```
+
+### Windows (PowerShell)
+
+```powershell
+irm https://raw.githubusercontent.com/jimmyalcala/ftp_downloader/master/install.ps1 | iex
+```
+
+### Manual download
+
+Pre-built binaries are available on the [Releases](https://github.com/jimmyalcala/ftp_downloader/releases) page for:
+- Windows (x86_64)
+- macOS (x86_64, Apple Silicon)
+- Linux (x86_64)
+
+## Build from Source
+
+### Requirements
 
 - [Rust](https://www.rust-lang.org/tools/install) 1.56 or higher
-
-## Installation
 
 ```bash
 git clone https://github.com/jimmyalcala/ftp_downloader.git
 cd ftp_downloader
+cargo build --release
 ```
 
 ## Configuration
