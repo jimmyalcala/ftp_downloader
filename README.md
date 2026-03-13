@@ -1,5 +1,7 @@
 # FTP Downloader
 
+[![Español](https://img.shields.io/badge/lang-Español-blue)](README.es.md)
+
 A Rust program that downloads all files from a remote FTP directory, featuring a Norton Commander-style TUI.
 
 ## Features
