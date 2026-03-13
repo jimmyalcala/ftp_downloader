@@ -3,5 +3,9 @@ host = "ftpb2.dronena.com"
 port = 21
 username = "x46"
 password = "ftpdnx46"
-remote_directory = "/clientes/Z167/FACTURA"
+remote_directory = "/clientes/Z167/FacturaDronena"
 local_directory = "./descargas"
+# Timeout en segundos para la conexión y transferencias (por defecto 15)
+timeout = 15
+# Mostrar interfaz gráfica TUI (true/false, por defecto true)
+gui = false
