@@ -1,0 +1,11 @@
+# FTP Downloader configuration
+host = "ftp.example.com"
+port = 21
+username = "your_username"
+password = "your_password"
+remote_directory = "/remote/path"
+local_directory = "./downloads"
+# Timeout in seconds (default 15)
+timeout = 15
+# Show TUI interface (default true)
+gui = true
